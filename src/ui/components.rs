@@ -123,6 +123,10 @@ pub(super) fn hide_traffic_lights(window: &gpui::Window, hide_minimize: bool) {
     }
 }
 
+/// 非 macOS 平台没有红绿灯按钮，提供空实现，调用方不必再写条件编译。
+#[cfg(not(target_os = "macos"))]
+pub(super) fn hide_traffic_lights(_window: &gpui::Window, _hide_minimize: bool) {}
+
 /// Windows 使用原生命中区，macOS/Linux 在按下时将拖拽交给系统。
 pub(super) fn window_drag_area(id: &'static str) -> Stateful<Div> {
     div()

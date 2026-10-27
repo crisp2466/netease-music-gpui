@@ -1,0 +1,97 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 打 tag 时需要创建 Release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      # 补丁文件必须保持 LF，否则 prepare_gpui.py 里的 git apply 会失败
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendor/ncm-api-rs 是 submodule
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 仓库里的 GPUI 补丁给 PrimitiveBatch 新增了 BackdropBlurs，
+      # 但 Windows 用的 gpui-pre-windows (DirectX) 没被补丁覆盖，match 不穷尽导致编译失败。
+      # 这里先拉取依赖，再给它补一个空分支（Windows 上不绘制毛玻璃）。
+      - name: Prepare GPUI sources
+        run: python scripts/prepare_gpui.py
+
+      - name: Fetch crates
+        run: cargo fetch --locked
+
+      - name: Patch gpui-pre-windows (BackdropBlurs arm)
+        shell: python
+        run: |
+          import glob, os
+
+          home = os.environ.get("CARGO_HOME") or os.path.expanduser("~/.cargo")
+          pattern = os.path.join(home, "registry", "src", "*", "gpui-pre-windows-*", "src", "directx_renderer.rs")
+          files = glob.glob(pattern)
+          if not files:
+              raise SystemExit("gpui-pre-windows source not found: " + pattern)
+
+          anchor = "PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),"
+          arm = "\n                PrimitiveBatch::BackdropBlurs(_) => Ok(()),"
+
+          for path in files:
+              with open(path, encoding="utf-8", newline="") as f:
+                  text = f.read()
+              if "BackdropBlurs" in text:
+                  print("already patched:", path)
+                  continue
+              if anchor not in text:
+                  raise SystemExit("anchor not found in " + path)
+              with open(path, "w", encoding="utf-8", newline="") as f:
+                  f.write(text.replace(anchor, anchor + arm, 1))
+              print("patched:", path)
+
+      # package.py 会再跑一次 prepare_gpui.py（已准备好则跳过），然后 cargo build --release 并复制 assets
+      - name: Build & package
+        run: python scripts/package.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netease-music-gpui-windows-x64
+          path: target/bundle/netease-music-gpui
+          if-no-files-found: error
+
+      # ---- 以下仅在推送 v* tag 时执行：打 zip 并发布 Release ----
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/bundle/netease-music-gpui" -DestinationPath "netease-music-gpui-windows-x64.zip"
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: netease-music-gpui-windows-x64.zip
+          generate_release_notes: true
